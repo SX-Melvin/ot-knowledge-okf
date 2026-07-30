@@ -1,13 +1,18 @@
-using System.Text;
-using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 using Microsoft.Playwright;
+using OTKnowledgeOKF.Dto;
 using OTKnowledgeOKF.Utils;
+using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using static OTKnowledgeOKF.Dto.OllamaDto;
 
 namespace OTKnowledgeOKF.Scraping;
 
 public sealed class OpenTextScraperService(
-    IOptions<OpenTextScraperOptions> configuredOptions)
+    IOptions<OpenTextScraperOptions> configuredOptions,
+    IHttpClientFactory httpClientFactory,
+    ILogger<OpenTextScraperService> logger)
 {
     private const string SubmittedTicketMode = "SUBMITTED_TICKET";
     private const string PublicTicketMode = "PUBLIC_TICKET";
@@ -91,7 +96,7 @@ public sealed class OpenTextScraperService(
                         ListSection("Applies to", await ExtractAppliesToAsync(ticket)) 
                     };
                     var caseNumber = await ticket.Locator(".kb-number-info .ng-binding").First.InnerTextAsync();
-                    await WriteOkfFileAsync(outputPath, "knowledge-base-article", caseNumber, title, summary, string.Join("\n\n", sections));
+                    await WriteOkfFileAsync(outputPath, "knowledge-base-article", caseNumber, title, summary, string.Join("\n\n", sections), cancellationToken);
                     count++;
                 }
                 finally { await ticket.CloseAsync(); }
@@ -127,7 +132,7 @@ public sealed class OpenTextScraperService(
                 {
                     var ticketTask = page.Context.WaitForPageAsync(); await page.Locator(".otTableFont.ng-scope .ng-binding[role='link']").Nth(index).ClickAsync();
                     var ticket = await ticketTask;
-                    try { count += await ScrapeSubmittedTicketAsync(ticket, outputPath); }
+                    try { count += await ScrapeSubmittedTicketAsync(ticket, outputPath, cancellationToken); }
                     finally { await ticket.CloseAsync(); await page.BringToFrontAsync(); }
                 }
                 var next = page.Locator("[aria-label='Next page ']");
@@ -138,7 +143,7 @@ public sealed class OpenTextScraperService(
         return count;
     }
 
-    private async Task<int> ScrapeSubmittedTicketAsync(IPage ticket, string outputPath)
+    private async Task<int> ScrapeSubmittedTicketAsync(IPage ticket, string outputPath, CancellationToken cancellationToken)
     {
         await ticket.BringToFrontAsync();
         var title = await TextOrDefaultAsync(ticket.Locator(".m-n.sd.ng-binding"), "untitled-ticket");
@@ -163,12 +168,12 @@ public sealed class OpenTextScraperService(
             );
             threads.Add($"## Thread {index + 1}\n\n**Author:** {author}\n\n**Time:** {time}\n\n{string.Join("\n\n", comments)}");
         }
-        await WriteOkfFileAsync(outputPath, "support-case-thread", caseNumber, title, description, string.Join("\n\n", threads));
+        await WriteOkfFileAsync(outputPath, "support-case-thread", caseNumber, title, description, string.Join("\n\n", threads), cancellationToken);
         return 1;
     }
 
     private static async Task<string> ExtractTicketSectionAsync(IPage page, string section) =>
-        await page.Locator("h3.ng-binding").EvaluateAllAsync<string>("(elements, section) => { const heading = [...elements].find(el => el.innerText.trim() === section); return heading?.parentElement?.parentElement?.querySelector('section.ng-binding.ng-scope')?.innerText?.trim() || ''; }", section);
+        await page.Locator("h3.ng-binding").EvaluateAllAsync<string>("(elements, section) => { const heading = [...elements].find(el => el.innerText.trim() === section); return heading?.parentElement?.querySelector('section.ng-binding.ng-scope')?.innerText?.trim() || ''; }", section);
     private static async Task<string[]> ExtractAppliesToAsync(IPage page) =>
     await page.Locator("h3.ng-binding").EvaluateAllAsync<string[]>(@"
         elements => {
@@ -206,12 +211,111 @@ public sealed class OpenTextScraperService(
         var values = new[] { "LAST_YEAR", "LAST_SIX_MONTHS", "LAST_THREE_MONTHS", "LAST_MONTH", "LAST_TWO_WEEKS", "LAST_WEEK" };
         return values.Contains(filter) ? $"{url}&modified={Array.IndexOf(values, filter)}" : url;
     }
-    private static async Task WriteOkfFileAsync(string root, string profile, string name, string title, string description, string body)
+    private async Task WriteOkfFileAsync(string root, string profile, string name, string title, string description, string body, CancellationToken cancellationToken)
     {
         var safeName = Regex.Replace(name, @"[<>:""/\\|?*]", "_").Trim(); var directory = Path.Combine(root, safeName);
         Directory.CreateDirectory(directory);
+        description = await SimplifyDescriptionAsync(name, title, description, body, cancellationToken);
         var frontmatter = $"---\nprofile: \"{Yaml(profile)}\"\nname: \"{Yaml(name)}\"\ntitle: \"{Yaml(title)}\"\ndescription: \"{Yaml(Regex.Replace(description, @"\s+", " ").Trim())}\"\ncreated: \"{DateTimeOffset.Now:O}\"\n---";
-        await File.WriteAllTextAsync(Path.Combine(directory, "index.md"), string.IsNullOrWhiteSpace(body) ? $"{frontmatter}\n" : $"{frontmatter}\n\n{body.Trim()}\n", Encoding.UTF8);
+        await File.WriteAllTextAsync(Path.Combine(directory, "index.md"), string.IsNullOrWhiteSpace(body) ? $"{frontmatter}\n" : $"{frontmatter}\n\n{body.Trim()}\n", Encoding.UTF8, cancellationToken);
+    }
+    private async Task<string> SimplifyDescriptionAsync(
+    string name,
+    string title,
+    string description,
+    string body,
+    CancellationToken cancellationToken)
+    {
+        var ollama = configuredOptions.Value.Ollama;
+        if (!ollama.Enabled)
+            return description;
+
+        var bodyExcerpt = body.Length <= ollama.MaxBodyCharacters
+            ? body
+            : body[..ollama.MaxBodyCharacters];
+
+        try
+        {
+            using var client = httpClientFactory.CreateClient();
+            client.BaseAddress = new Uri(ollama.BaseUrl.TrimEnd('/') + "/");
+            client.Timeout = TimeSpan.FromSeconds(ollama.TimeoutSeconds);
+
+            using var response = await client.PostAsJsonAsync(
+                "api/chat",
+                new
+                {
+                    model = ollama.Model,
+                    stream = false,
+                    messages = new object[]
+                    {
+                    new
+                    {
+                        role = "system",
+                        content =
+                            """
+                            You are generating metadata for a knowledge base.
+
+                            Your task is to write a short DESCRIPTION.
+
+                            Requirements:
+                            - Output exactly one paragraph.
+                            - Maximum 3 sentences.
+                            - No Markdown.
+                            - No lists.
+                            - No headings.
+                            - No quotation marks.
+                            - Do not explain your reasoning.
+                            - Do not summarize every version number.
+                            - Focus on the problem and the solution.
+                            - Preserve important product names and error codes.
+                            - If there is insufficient information, summarize only what is known.
+                            """
+                    },
+                    new
+                    {
+                        role = "user",
+                        content =
+                            $"""
+                            Write a concise description (1-3 sentences) for this knowledge record.
+
+                            Name: {name}
+                            Title: {title}
+                            Existing description: {description}
+
+                            Body:
+                            {bodyExcerpt}
+                            """
+                    }
+                    },
+                    options = new
+                    {
+                        temperature = 0.2,
+                        num_predict = 120
+                    }
+                },
+                cancellationToken);
+
+            response.EnsureSuccessStatusCode();
+
+            var result = await response.Content.ReadFromJsonAsync<OllamaChatResponse>(cancellationToken);
+
+            var simplified = result?.Message?.Content?.Trim();
+
+            return string.IsNullOrWhiteSpace(simplified)
+                ? description
+                : simplified;
+        }
+        catch (Exception exception) when (
+            exception is HttpRequestException
+            or TaskCanceledException
+            or JsonException)
+        {
+            logger.LogWarning(exception,
+                "Could not simplify description with Ollama; using the scraped description.");
+
+            return description;
+        }
     }
     private static string Yaml(string value) => value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+    private sealed record OllamaGenerateResponse(string? Response);
 }

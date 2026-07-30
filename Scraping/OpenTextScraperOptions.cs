@@ -14,6 +14,16 @@ public sealed class OpenTextScraperOptions
     public string OkfPath { get; init; } = ".";
     public string UserDataDir { get; init; } = "./chrome-profile";
     public string? ExecutablePath { get; init; }
+    public OllamaOptions Ollama { get; init; } = new();
+}
+
+public sealed class OllamaOptions
+{
+    public bool Enabled { get; init; }
+    public string BaseUrl { get; init; } = "http://localhost:11434";
+    public string Model { get; init; } = "llama3.2";
+    public int TimeoutSeconds { get; init; } = 60;
+    public int MaxBodyCharacters { get; init; } = 12_000;
 }
 
 public sealed record RunScrapeRequest();
