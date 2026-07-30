@@ -1,0 +1,6 @@
+@OTKnowledgeOKF_HostAddress = http://localhost:5128
+
+GET {{OTKnowledgeOKF_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
