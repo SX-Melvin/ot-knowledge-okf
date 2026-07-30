@@ -4,3 +4,15 @@ GET {{OTKnowledgeOKF_HostAddress}}/weatherforecast/
 Accept: application/json
 
 ###
+
+# Runs the configured scraper. Omit the body to use OpenTextScraper:ScrapMode
+# and OpenTextScraper:TimeFilter from appsettings.json.
+POST {{OTKnowledgeOKF_HostAddress}}/api/opentext-scraper/run
+Content-Type: application/json
+
+{
+  "mode": "PUBLIC_TICKET",
+  "timeFilter": "LAST_MONTH"
+}
+
+###
