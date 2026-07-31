@@ -88,15 +88,26 @@ public sealed class OpenTextScraperService(
                     await ticket.BringToFrontAsync();
                     var title = await ticket.Locator("h2.widget-header").InnerTextAsync();
                     var summary = await ExtractTicketSectionAsync(ticket, "Summary");
+                    var resolution = await ExtractTicketSectionAsync(ticket, "Resolution");
                     var sections = new[] {
-                        TicketSection("Summary", summary, false), 
-                        TicketSection("Cause", await ExtractTicketSectionAsync(ticket, "Cause")),
-                        TicketSection("Resolution", await ExtractTicketSectionAsync(ticket, "Resolution")), TicketSection("Additional Information", 
-                        await ExtractTicketSectionAsync(ticket, "Additional Information")),
-                        ListSection("Applies to", await ExtractAppliesToAsync(ticket)) 
+                        "# " + title,
+                        TicketSection("Problem Description", summary), 
+                        //TicketSection("Symptoms", await ExtractTicketSectionAsync(ticket, "Additional Information")),
+                        TicketSection("Root Cause", await ExtractTicketSectionAsync(ticket, "Cause")),
+                        TicketSection("Resolution Steps", resolution), 
+                        TicketSection("Verification", await ExtractTicketSectionAsync(ticket, "Additional Information")),
+                        //TicketSection("Related Articles & References", await ExtractTicketSectionAsync(ticket, "Additional Information")),
                     };
                     var caseNumber = await ticket.Locator(".kb-number-info .ng-binding").First.InnerTextAsync();
-                    await WriteOkfFileAsync(outputPath, "knowledge-base-article", caseNumber, title, summary, string.Join("\n\n", sections), cancellationToken);
+                    await WriteOkfFileAsync(outputPath, new()
+                    {
+                        Id = caseNumber,
+                        Sensitivity = OKFHeaderSensitivity.Internal,
+                        Type = OKFHeaderType.KnowledgeBaseArticle,
+                        Confidence = OKFHeaderConfidence.Probable,
+                        Status = resolution.Length > 0 ? OKFHeaderStatus.Solved : OKFHeaderStatus.Process,
+                        Related = [],
+                    }, string.Join("\n\n", sections), cancellationToken);
                     count++;
                 }
                 finally { await ticket.CloseAsync(); }
@@ -168,7 +179,14 @@ public sealed class OpenTextScraperService(
             );
             threads.Add($"## Thread {index + 1}\n\n**Author:** {author}\n\n**Time:** {time}\n\n{string.Join("\n\n", comments)}");
         }
-        await WriteOkfFileAsync(outputPath, "support-case-thread", caseNumber, title, description, string.Join("\n\n", threads), cancellationToken);
+        await WriteOkfFileAsync(outputPath, new()
+        {
+            Type = OKFHeaderType.SupportCaseThread,
+            Sensitivity = OKFHeaderSensitivity.Internal,
+            Confidence = OKFHeaderConfidence.Probable,
+            Id = caseNumber,
+            Related = [],
+        }, string.Join("\n\n", threads), cancellationToken);
         return 1;
     }
 
@@ -192,7 +210,7 @@ public sealed class OpenTextScraperService(
                 .filter(Boolean);
         }
     ") ?? [];
-    private static string TicketSection(string title, string text, bool divider = true) => text.Length == 0 ? "" : divider ? $"## {title}\n\n{text}" : $"# {title}\n\n{text}";
+    private static string TicketSection(string title, string text) => text.Length == 0 ? "" : $"## {title}\n\n{text}";
     private static string ListSection(string title, IReadOnlyList<string> values) => $"## {title}\n\n{string.Join("\n", values.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => $"- {x}"))}";
     private static async Task<string> TextOrDefaultAsync(ILocator locator, string fallback) 
     { 
@@ -211,12 +229,12 @@ public sealed class OpenTextScraperService(
         var values = new[] { "LAST_YEAR", "LAST_SIX_MONTHS", "LAST_THREE_MONTHS", "LAST_MONTH", "LAST_TWO_WEEKS", "LAST_WEEK" };
         return values.Contains(filter) ? $"{url}&modified={Array.IndexOf(values, filter)}" : url;
     }
-    private async Task WriteOkfFileAsync(string root, string profile, string name, string title, string description, string body, CancellationToken cancellationToken)
+    private async Task WriteOkfFileAsync(string root, OKFHeaderConfig config, string body, CancellationToken cancellationToken)
     {
-        var safeName = Regex.Replace(name, @"[<>:""/\\|?*]", "_").Trim(); var directory = Path.Combine(root, safeName);
+        var safeName = Regex.Replace(config.Id, @"[<>:""/\\|?*]", "_").Trim(); var directory = Path.Combine(root, safeName);
         Directory.CreateDirectory(directory);
-        description = await SimplifyDescriptionAsync(name, title, description, body, cancellationToken);
-        var frontmatter = $"---\nprofile: \"{Yaml(profile)}\"\nname: \"{Yaml(name)}\"\ntitle: \"{Yaml(title)}\"\ndescription: \"{Yaml(Regex.Replace(description, @"\s+", " ").Trim())}\"\ncreated: \"{DateTimeOffset.Now:O}\"\n---";
+        //description = await SimplifyDescriptionAsync(config.Id, title, description, body, cancellationToken);
+        var frontmatter = OKFUtils.GenerateHeader(config);
         await File.WriteAllTextAsync(Path.Combine(directory, "index.md"), string.IsNullOrWhiteSpace(body) ? $"{frontmatter}\n" : $"{frontmatter}\n\n{body.Trim()}\n", Encoding.UTF8, cancellationToken);
     }
     private async Task<string> SimplifyDescriptionAsync(
