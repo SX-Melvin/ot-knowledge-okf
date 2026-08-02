@@ -8,9 +8,9 @@
     {
         public string Id { get; set; }
         public OKFHeaderType Type { get; set; }
-        public string Product { get; set; }
-        public string Module { get; set; }
-        public string IssueType { get; set; }
+        public string? Product { get; set; } = "Content Server";
+        public string? Module { get; set; } = "Content Server";
+        public string? IssueType { get; set; } = "Content Server";
         public List<string> Tags { get; set; }
         public OKFHeaderConfidence Confidence { get; set; }
         public OKFHeaderStatus Status { get; set; }

@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Options;
 using Microsoft.Playwright;
+using Newtonsoft.Json;
 using OTKnowledgeOKF.Dto;
+using OTKnowledgeOKF.Dto.KnowledgeBase;
 using OTKnowledgeOKF.Utils;
 using System.Text;
 using System.Text.Json;
@@ -81,27 +83,78 @@ public sealed class OpenTextScraperService(
             foreach (var link in links)
             {
                 var newPageTask = page.Context.WaitForPageAsync();
-                await link.ClickAsync(new() { Modifiers = [KeyboardModifier.Control] });
+
+                await link.ClickAsync(new()
+                {
+                    Modifiers = [KeyboardModifier.Control]
+                });
+
                 var ticket = await newPageTask;
+
+                var responseTask = ticket.WaitForResponseAsync(response =>
+                    response.Url.StartsWith(
+                        "https://support.opentext.com/api/now/sp/page",
+                        StringComparison.OrdinalIgnoreCase
+                    )
+                    && response.Request.Method == "GET"
+                );
+
+                await ticket.ReloadAsync();
+
+                var response = await responseTask;
+
+                var json = JsonConvert.DeserializeObject<GetArticleResponse>(await response.TextAsync());
+
+                Console.WriteLine($"URL: {response.Url}");
+                Console.WriteLine($"Status: {response.Status}");
+                Console.WriteLine(json);
+
                 try
                 {
+                    var shortDesc = json.Result.Theme.Containers
+                        ?.SelectMany(container => container.Rows ?? [])
+                        .SelectMany(row => row.Columns ?? [])
+                        .SelectMany(column => column.Widgets ?? [])
+                        .Where(widget => widget.Widget?.Data?.KbContentData?.Data?.ShortDesc != null)
+                        .Select(widget => widget.Widget!.Data!.KbContentData!.Data!.ShortDesc)
+                        .FirstOrDefault();
+                    var kbCase = json.Result.Theme.Containers
+                        ?.SelectMany(container => container.Rows ?? [])
+                        .SelectMany(row => row.Columns ?? [])
+                        .SelectMany(column => column.Widgets ?? [])
+                        .Where(widget => widget.Widget?.Data?.BreadCrumb != null)
+                        .SelectMany(widget => widget.Widget!.Data!.BreadCrumb ?? [])
+                        .FirstOrDefault(x => x.Type == KnowledgeType.KnowledgeBase);
+                    var kbIssueType = json.Result.Theme.Containers
+                        ?.SelectMany(container => container.Rows ?? [])
+                        .SelectMany(row => row.Columns ?? [])
+                        .SelectMany(column => column.Widgets ?? [])
+                        .Where(widget => widget.Widget?.Data?.BreadCrumb != null)
+                        .SelectMany(widget => widget.Widget!.Data!.BreadCrumb ?? [])
+                        .FirstOrDefault(x => x.Type == KnowledgeType.Category);
+
+                    Console.WriteLine(shortDesc);
+                    Console.WriteLine(kbCase);
+                    Console.WriteLine(kbIssueType);
+
                     await ticket.BringToFrontAsync();
-                    var title = await ticket.Locator("h2.widget-header").InnerTextAsync();
-                    var summary = await ExtractTicketSectionAsync(ticket, "Summary");
                     var resolution = await ExtractTicketSectionAsync(ticket, "Resolution");
                     var sections = new[] {
-                        "# " + title,
-                        TicketSection("Problem Description", summary), 
-                        //TicketSection("Symptoms", await ExtractTicketSectionAsync(ticket, "Additional Information")),
+                        "# " + await ticket.Locator("h2.widget-header").InnerTextAsync(),
+                        TicketSection("Problem Description", await ExtractTicketSectionAsync(ticket, "Summary")), 
+                        TicketSection("Symptoms", "None."), // TODO: WHERE TO GET?
                         TicketSection("Root Cause", await ExtractTicketSectionAsync(ticket, "Cause")),
                         TicketSection("Resolution Steps", resolution), 
                         TicketSection("Verification", await ExtractTicketSectionAsync(ticket, "Additional Information")),
-                        //TicketSection("Related Articles & References", await ExtractTicketSectionAsync(ticket, "Additional Information")),
+                        TicketSection("Related Articles & References", "None."), // TODO: WIP
                     };
                     var caseNumber = await ticket.Locator(".kb-number-info .ng-binding").First.InnerTextAsync();
                     await WriteOkfFileAsync(outputPath, new()
                     {
                         Id = caseNumber,
+                        Product = shortDesc,
+                        Module = kbCase?.Label,
+                        IssueType = kbIssueType?.Label,
                         Sensitivity = OKFHeaderSensitivity.Internal,
                         Type = OKFHeaderType.KnowledgeBaseArticle,
                         Confidence = OKFHeaderConfidence.Probable,
@@ -326,7 +379,7 @@ public sealed class OpenTextScraperService(
         catch (Exception exception) when (
             exception is HttpRequestException
             or TaskCanceledException
-            or JsonException)
+            or System.Text.Json.JsonException)
         {
             logger.LogWarning(exception,
                 "Could not simplify description with Ollama; using the scraped description.");
@@ -334,6 +387,5 @@ public sealed class OpenTextScraperService(
             return description;
         }
     }
-    private static string Yaml(string value) => value.Replace("\\", "\\\\").Replace("\"", "\\\"");
     private sealed record OllamaGenerateResponse(string? Response);
 }
