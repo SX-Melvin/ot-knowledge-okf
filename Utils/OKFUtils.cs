@@ -12,7 +12,7 @@ namespace OTKnowledgeOKF.Utils
 
         public static string GenerateHeader(OKFHeaderConfig config)
         {
-            return $"---\ntype: \"{SanitizeString(config.Type.ToString())}\"\nid: \"{SanitizeString(config.Id)}\"\nproduct: \"{SanitizeString(config.Product)}\"\nmodule: \"{SanitizeString(config.Module)}\"\nissue_type: \"{SanitizeString(config.IssueType)}\"\ntags: \"{SanitizeList(config.Tags)}\"\nconfidence: \"{SanitizeString(config.Confidence.ToString())}\"\n\nsensitivity: \"{SanitizeString(config.Sensitivity.ToString())}\"\n\nrelated: \"{SanitizeList(config.Related)}\"\n---";
+            return $"---\ntype: \"{SanitizeString(config.Type.ToString())}\"\nid: \"{SanitizeString(config.Id)}\"\nproduct: \"{SanitizeString(config.Product)}\"\nmodule: \"{SanitizeString(config.Module)}\"\nissue_type: \"{SanitizeString(config.IssueType)}\"\ntags: [{SanitizeList(config.Tags)}]\nconfidence: \"{SanitizeString(config.Confidence.ToString())}\"\nstatus: \"{SanitizeString(config.Status.ToString())}\"\nsensitivity: \"{SanitizeString(config.Sensitivity.ToString())}\"\nrelated: [{SanitizeList(config.Related)}]\n---";
         }
     }
 }

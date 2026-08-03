@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Options;
 using Microsoft.Playwright;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Converters;
 using OTKnowledgeOKF.Dto;
 using OTKnowledgeOKF.Dto.KnowledgeBase;
 using OTKnowledgeOKF.Utils;
@@ -76,6 +77,10 @@ public sealed class OpenTextScraperService(
 
     private async Task<int> ScrapePublicTicketsAsync(IPage page, string outputPath, CancellationToken cancellationToken)
     {
+        var settings = new JsonSerializerSettings
+        {
+            Converters = { new StringEnumConverter() }
+        };
         var count = 0;
         while (true)
         {
@@ -103,39 +108,30 @@ public sealed class OpenTextScraperService(
 
                 var response = await responseTask;
 
-                var json = JsonConvert.DeserializeObject<GetArticleResponse>(await response.TextAsync());
-
-                Console.WriteLine($"URL: {response.Url}");
-                Console.WriteLine($"Status: {response.Status}");
-                Console.WriteLine(json);
+                var json = JsonConvert.DeserializeObject<GetArticleResponse>(await response.TextAsync(), settings);
 
                 try
                 {
-                    var shortDesc = json.Result.Theme.Containers
+                    var shortDesc = json.Result.Containers
                         ?.SelectMany(container => container.Rows ?? [])
                         .SelectMany(row => row.Columns ?? [])
                         .SelectMany(column => column.Widgets ?? [])
-                        .Where(widget => widget.Widget?.Data?.KbContentData?.Data?.ShortDesc != null)
-                        .Select(widget => widget.Widget!.Data!.KbContentData!.Data!.ShortDesc)
-                        .FirstOrDefault();
-                    var kbCase = json.Result.Theme.Containers
+                        .Select(widgets => widgets.Widget?.Data?.ShortDesc)
+                        .FirstOrDefault(x => x != null);
+                    var kbCase = json.Result.Containers
                         ?.SelectMany(container => container.Rows ?? [])
                         .SelectMany(row => row.Columns ?? [])
                         .SelectMany(column => column.Widgets ?? [])
                         .Where(widget => widget.Widget?.Data?.BreadCrumb != null)
                         .SelectMany(widget => widget.Widget!.Data!.BreadCrumb ?? [])
                         .FirstOrDefault(x => x.Type == KnowledgeType.KnowledgeBase);
-                    var kbIssueType = json.Result.Theme.Containers
+                    var kbIssueType = json.Result.Containers
                         ?.SelectMany(container => container.Rows ?? [])
                         .SelectMany(row => row.Columns ?? [])
                         .SelectMany(column => column.Widgets ?? [])
                         .Where(widget => widget.Widget?.Data?.BreadCrumb != null)
                         .SelectMany(widget => widget.Widget!.Data!.BreadCrumb ?? [])
                         .FirstOrDefault(x => x.Type == KnowledgeType.Category);
-
-                    Console.WriteLine(shortDesc);
-                    Console.WriteLine(kbCase);
-                    Console.WriteLine(kbIssueType);
 
                     await ticket.BringToFrontAsync();
                     var resolution = await ExtractTicketSectionAsync(ticket, "Resolution");
@@ -148,13 +144,13 @@ public sealed class OpenTextScraperService(
                         TicketSection("Verification", await ExtractTicketSectionAsync(ticket, "Additional Information")),
                         TicketSection("Related Articles & References", "None."), // TODO: WIP
                     };
-                    var caseNumber = await ticket.Locator(".kb-number-info .ng-binding").First.InnerTextAsync();
                     await WriteOkfFileAsync(outputPath, new()
                     {
-                        Id = caseNumber,
-                        Product = shortDesc,
+                        Id = await ticket.Locator(".kb-number-info .ng-binding").First.InnerTextAsync(),
+                        Product = shortDesc != null ? shortDesc[..shortDesc.IndexOf(" - ")].Trim() : "Content Server",
                         Module = kbCase?.Label,
                         IssueType = kbIssueType?.Label,
+                        Tags = [],
                         Sensitivity = OKFHeaderSensitivity.Internal,
                         Type = OKFHeaderType.KnowledgeBaseArticle,
                         Confidence = OKFHeaderConfidence.Probable,
