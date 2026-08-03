@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.Extensions.Options;
 using Microsoft.Playwright;
 using Newtonsoft.Json;
@@ -20,7 +21,10 @@ public sealed class OpenTextScraperService(
     private const string SubmittedTicketMode = "SUBMITTED_TICKET";
     private const string PublicTicketMode = "PUBLIC_TICKET";
     private readonly SemaphoreSlim runLock = new(1, 1);
-
+    private readonly JsonSerializerSettings jsonSettings = new JsonSerializerSettings
+    {
+        Converters = { new StringEnumConverter() }
+    };
     public async Task<ScrapeResult> RunAsync(RunScrapeRequest? request, CancellationToken cancellationToken)
     {
         if (!await runLock.WaitAsync(0, cancellationToken))
@@ -77,10 +81,6 @@ public sealed class OpenTextScraperService(
 
     private async Task<int> ScrapePublicTicketsAsync(IPage page, string outputPath, CancellationToken cancellationToken)
     {
-        var settings = new JsonSerializerSettings
-        {
-            Converters = { new StringEnumConverter() }
-        };
         var count = 0;
         while (true)
         {
@@ -107,8 +107,7 @@ public sealed class OpenTextScraperService(
                 await ticket.ReloadAsync();
 
                 var response = await responseTask;
-
-                var json = JsonConvert.DeserializeObject<GetArticleResponse>(await response.TextAsync(), settings);
+                var json = JsonConvert.DeserializeObject<GetArticleResponse>(await response.TextAsync(), jsonSettings);
 
                 try
                 {
@@ -190,10 +189,23 @@ public sealed class OpenTextScraperService(
                 var linkCount = await ticketLinks.CountAsync();
                 for (var index = 0; index < linkCount; index++)
                 {
-                    var ticketTask = page.Context.WaitForPageAsync(); await page.Locator(".otTableFont.ng-scope .ng-binding[role='link']").Nth(index).ClickAsync();
+                    var ticketTask = page.Context.WaitForPageAsync();
+
+                    await page.Locator(".otTableFont.ng-scope .ng-binding[role='link']")
+                        .Nth(index)
+                        .ClickAsync();
+
                     var ticket = await ticketTask;
-                    try { count += await ScrapeSubmittedTicketAsync(ticket, outputPath, cancellationToken); }
-                    finally { await ticket.CloseAsync(); await page.BringToFrontAsync(); }
+
+                    try
+                    {
+                        count += await ScrapeSubmittedTicketAsync(ticket, outputPath, cancellationToken); 
+                    }
+                    finally
+                    { 
+                        await ticket.CloseAsync();
+                        await page.BringToFrontAsync(); 
+                    }
                 }
                 var next = page.Locator("[aria-label='Next page ']");
                 if (await next.CountAsync() == 0 || await next.IsDisabledAsync()) break;
@@ -206,9 +218,21 @@ public sealed class OpenTextScraperService(
     private async Task<int> ScrapeSubmittedTicketAsync(IPage ticket, string outputPath, CancellationToken cancellationToken)
     {
         await ticket.BringToFrontAsync();
-        var title = await TextOrDefaultAsync(ticket.Locator(".m-n.sd.ng-binding"), "untitled-ticket");
-        var caseNumber = await TextOrDefaultAsync(ticket.Locator(".ot-caseNumber.ng-binding"), "untitled-ticket-number");
-        var description = await TextOrDefaultAsync(ticket.Locator("[sn-atf-area='OT Case Description Ticket Tab']"), "");
+        var responseTask = ticket.WaitForResponseAsync(response =>
+            response.Url.StartsWith(
+                "https://support.opentext.com/api/now/sp/page",
+                StringComparison.OrdinalIgnoreCase
+            )
+            && response.Request.Method == "GET"
+        );
+        await ticket.ReloadAsync();
+        var response = await responseTask;
+
+        var json = JsonConvert.DeserializeObject<GetArticleResponse>(
+            await response.TextAsync(),
+            jsonSettings
+        );
+
         var threads = new List<string>(); 
         var timelines = ticket.Locator("div.timeline-panel.timeline-border");
         for (var index = 0; index < await timelines.CountAsync(); index++)
@@ -228,14 +252,25 @@ public sealed class OpenTextScraperService(
             );
             threads.Add($"## Thread {index + 1}\n\n**Author:** {author}\n\n**Time:** {time}\n\n{string.Join("\n\n", comments)}");
         }
+        var sections = new[] {
+            "# " + await TextOrDefaultAsync(ticket.Locator(".m-n.sd.ng-binding"), "None."),
+            string.Join("\n\n", threads),
+            TicketSection("Problem Description", await TextOrDefaultAsync(ticket.Locator("[sn-atf-area='OT Case Description Ticket Tab']"), "None.")),
+            TicketSection("Symptoms", "None."),
+            TicketSection("Root Cause", "None."),
+            TicketSection("Resolution Steps", "None."),
+            TicketSection("Verification", "None."),
+            TicketSection("Related Articles & References", "None."),
+        };
         await WriteOkfFileAsync(outputPath, new()
         {
             Type = OKFHeaderType.SupportCaseThread,
             Sensitivity = OKFHeaderSensitivity.Internal,
             Confidence = OKFHeaderConfidence.Probable,
-            Id = caseNumber,
+            Id = await TextOrDefaultAsync(ticket.Locator(".ot-caseNumber.ng-binding"), "untitled-ticket-number"),
+            Tags = [],
             Related = [],
-        }, string.Join("\n\n", threads), cancellationToken);
+        }, string.Join("\n\n", sections), cancellationToken);
         return 1;
     }
 
